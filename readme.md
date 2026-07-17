@@ -67,6 +67,3 @@ for your org and cluster first.
 | Plain shell (jump box / VM / cron) | [`examples/run.sh`](examples/run.sh) |
 
 ---
-
-Script written by Fable, readme written by a human (and extended for the
-examples).
