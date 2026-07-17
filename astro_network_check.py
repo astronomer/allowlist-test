@@ -29,6 +29,10 @@ or HTTP) so your networking team knows what to fix.
 Usage:
     python3 astro_network_check.py --orgId <orgId> --clusterId <clusterId>
 
+    The IDs can also be supplied via environment variables (handy in CI):
+        ASTRO_ORG_ID=<orgId> ASTRO_CLUSTER_ID=<clusterId> python3 astro_network_check.py
+    Command-line flags take precedence over the environment variables.
+
 Exit codes:
     0  all endpoints reachable
     1  one or more endpoints BLOCKED
@@ -752,12 +756,17 @@ def main(argv=None):
                     "from inside your network.",
         epilog="Run from the network segment that will actually egress to "
                "Astro (worker/CI host). See %s" % ALLOWLIST_DOC)
-    parser.add_argument("--orgId", required=True,
-                        help="Astro organization ID (used for <orgId>.astronomer.run)")
-    parser.add_argument("--clusterId", required=True,
+    parser.add_argument("--orgId", default=os.environ.get("ASTRO_ORG_ID"),
+                        help="Astro organization ID (used for <orgId>.astronomer.run); "
+                             "defaults to $ASTRO_ORG_ID")
+    parser.add_argument("--clusterId", default=os.environ.get("ASTRO_CLUSTER_ID"),
                         help="Astro cluster ID (used for <clusterId>.registry/"
-                             ".external.astronomer.run)")
+                             ".external.astronomer.run); defaults to $ASTRO_CLUSTER_ID")
     opts = parser.parse_args(argv)
+    if not opts.orgId:
+        parser.error("provide --orgId or set ASTRO_ORG_ID")
+    if not opts.clusterId:
+        parser.error("provide --clusterId or set ASTRO_CLUSTER_ID")
 
     targets = build_targets(opts.orgId, opts.clusterId)
     pal = Palette(sys.stdout.isatty())
