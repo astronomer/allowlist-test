@@ -1,0 +1,45 @@
+# ArgoCD PreSync hook — Astro egress allowlist check
+#
+# Runs as a PreSync hook so every sync verifies egress to Astro BEFORE the
+# app is deployed. If the check fails (endpoints blocked), the hook Job fails
+# and ArgoCD aborts the sync, so you never deploy into a broken-network state.
+#
+# Because it runs as a Pod in the target cluster, it tests the real egress
+# path your Astro workloads (and Remote Execution) will use.
+#
+# Prereqs: a ConfigMap named `astro-allowlist` with keys `orgId` and
+# `clusterId` in the same namespace, e.g.:
+#   kubectl create configmap astro-allowlist \
+#     --from-literal=orgId=<orgId> --from-literal=clusterId=<clusterId>
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: astro-allowlist-check
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: allowlist-check
+          image: python:3-slim
+          env:
+            - name: ASTRO_ORG_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: astro-allowlist
+                  key: orgId
+            - name: ASTRO_CLUSTER_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: astro-allowlist
+                  key: clusterId
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/astronomer/allowlist-test/main/astro_network_check.py', '/tmp/astro_network_check.py')"
+              python3 /tmp/astro_network_check.py

@@ -1,0 +1,26 @@
+# Azure DevOps Pipelines — Astro egress allowlist check
+#
+# IMPORTANT: use a self-hosted agent on your Astro egress path. Microsoft-
+# hosted agents egress from Azure DevOps's network, not your corporate
+# firewall, so they will not reflect what your deployments actually hit.
+#
+# Define ASTRO_ORG_ID and ASTRO_CLUSTER_ID as pipeline variables.
+
+trigger: none
+
+pool:
+  name: 'Default'          # <-- your self-hosted agent pool on the egress path
+
+variables:
+  RAW_URL: 'https://raw.githubusercontent.com/astronomer/allowlist-test/main/astro_network_check.py'
+
+steps:
+  - script: |
+      python3 -c "import urllib.request, os; urllib.request.urlretrieve(os.environ['RAW_URL'], 'astro_network_check.py')"
+      python3 astro_network_check.py
+    displayName: 'Astro allowlist check'
+    env:
+      ASTRO_ORG_ID: $(ASTRO_ORG_ID)
+      ASTRO_CLUSTER_ID: $(ASTRO_CLUSTER_ID)
+      RAW_URL: $(RAW_URL)
+    # exit 0 = all reachable, 1 = BLOCKED (fails the step), 2 = warnings.

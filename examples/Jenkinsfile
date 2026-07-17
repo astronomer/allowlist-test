@@ -1,0 +1,46 @@
+// Jenkins (declarative pipeline) — Astro egress allowlist check
+//
+// Drop this in as a pipeline job, or lift the `stage` into an existing
+// Jenkinsfile. It runs on the Jenkins agent, so make sure that agent sits on
+// the same network egress path your Astro deployments use.
+//
+// Fill in ORG_ID / CLUSTER_ID below (or wire them to job parameters /
+// credentials). Requires python3 on the agent (no other dependencies).
+
+pipeline {
+  agent any
+
+  parameters {
+    string(name: 'ASTRO_ORG_ID',     defaultValue: '', description: 'Astro organization short ID')
+    string(name: 'ASTRO_CLUSTER_ID', defaultValue: '', description: 'Astro cluster ID')
+  }
+
+  stages {
+    stage('Astro allowlist check') {
+      steps {
+        script {
+          // Fetch the checker with Python stdlib (no curl/wget dependency).
+          sh '''
+            python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/astronomer/allowlist-test/main/astro_network_check.py', 'astro_network_check.py')"
+          '''
+
+          // Run it and map its exit code to the build result.
+          def rc = sh(returnStatus: true, script: """
+            set +e
+            python3 astro_network_check.py --orgId '${params.ASTRO_ORG_ID}' --clusterId '${params.ASTRO_CLUSTER_ID}'
+          """)
+          echo "astro_network_check.py exit code: ${rc}"
+          if (rc == 0) {
+            echo 'RESULT: all Astro endpoints reachable.'
+          } else if (rc == 2) {
+            currentBuild.result = 'UNSTABLE'
+            echo 'RESULT: reachable, but warnings (e.g. TLS interception). Review the report above.'
+          } else {
+            currentBuild.result = 'FAILURE'
+            error('RESULT: one or more Astro endpoints BLOCKED. Hand the per-domain report above to your networking team.')
+          }
+        }
+      }
+    }
+  }
+}
