@@ -1,0 +1,28 @@
+# CircleCI — Astro egress allowlist check
+#
+# Add to .circleci/config.yml.
+#
+# IMPORTANT: CircleCI cloud executors egress from CircleCI's network, not
+# yours. To test your real egress, use a self-hosted runner in your VPC and
+# swap the `docker` executor for `machine`/your runner resource class.
+#
+# Set ASTRO_ORG_ID and ASTRO_CLUSTER_ID as project environment variables.
+
+version: 2.1
+
+jobs:
+  astro-allowlist-check:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - run:
+          name: Astro allowlist check
+          command: |
+            python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/astronomer/allowlist-test/main/astro_network_check.py', 'astro_network_check.py')"
+            python3 astro_network_check.py
+          # exit 0 = all reachable, 1 = BLOCKED (fails the job), 2 = warnings.
+
+workflows:
+  allowlist:
+    jobs:
+      - astro-allowlist-check

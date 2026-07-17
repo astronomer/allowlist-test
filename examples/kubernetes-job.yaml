@@ -1,0 +1,35 @@
+# Kubernetes Job — Astro egress allowlist check
+#
+# A plain Job you can run in any cluster / namespace, including the one your
+# Astro Remote Execution workers run in. Running it there tests the exact
+# egress path your workloads use.
+#
+#   kubectl apply -f kubernetes-job.yaml
+#   kubectl logs -f job/astro-allowlist-check
+#   kubectl delete job astro-allowlist-check   # cleanup
+#
+# Replace the two REPLACE_WITH_* values below (or switch them to a
+# configMapKeyRef / secretKeyRef as in argocd-presync-job.yaml).
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: astro-allowlist-check
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: allowlist-check
+          image: python:3-slim
+          env:
+            - name: ASTRO_ORG_ID
+              value: "REPLACE_WITH_ORG_ID"
+            - name: ASTRO_CLUSTER_ID
+              value: "REPLACE_WITH_CLUSTER_ID"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/astronomer/allowlist-test/main/astro_network_check.py', '/tmp/astro_network_check.py')"
+              python3 /tmp/astro_network_check.py

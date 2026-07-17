@@ -1,0 +1,34 @@
+# GitHub Actions — Astro egress allowlist check
+#
+# Save as .github/workflows/astro-allowlist-check.yml in your repo.
+#
+# IMPORTANT: run this on a self-hosted runner that lives on the same network
+# egress path as your Astro deployments. GitHub-hosted runners egress from
+# GitHub's network, not your corporate firewall/proxy, so they will pass even
+# when your real deployments are blocked.
+#
+# Set ASTRO_ORG_ID and ASTRO_CLUSTER_ID as repository or organization
+# variables (Settings -> Secrets and variables -> Actions -> Variables).
+
+name: astro-allowlist-check
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 13 * * 1"   # weekly on Mondays (optional)
+
+jobs:
+  allowlist-check:
+    runs-on: self-hosted   # <-- must be on your Astro egress path
+    steps:
+      - name: Fetch checker
+        run: |
+          python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/astronomer/allowlist-test/main/astro_network_check.py', 'astro_network_check.py')"
+
+      - name: Run Astro allowlist check
+        env:
+          ASTRO_ORG_ID: ${{ vars.ASTRO_ORG_ID }}
+          ASTRO_CLUSTER_ID: ${{ vars.ASTRO_CLUSTER_ID }}
+        run: python3 astro_network_check.py
+        # exit 0 = all reachable, 1 = something BLOCKED (fails the job),
+        # 2 = reachable with warnings (e.g. TLS interception).
