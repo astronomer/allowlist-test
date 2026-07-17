@@ -7,6 +7,8 @@
 # swap the `docker` executor for `machine`/your runner resource class.
 #
 # Set ASTRO_ORG_ID and ASTRO_CLUSTER_ID as project environment variables.
+# Optionally also set ASTRO_MODE (hosted|remote-execution) and ASTRO_CLOUD
+# (aws|gcp|azure); the script reads them from the environment. See the README.
 
 version: 2.1
 

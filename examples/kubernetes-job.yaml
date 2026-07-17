@@ -28,6 +28,11 @@ spec:
               value: "REPLACE_WITH_ORG_ID"
             - name: ASTRO_CLUSTER_ID
               value: "REPLACE_WITH_CLUSTER_ID"
+            # Optional (see README): remote-execution mode + your exec-plane cloud.
+            - name: ASTRO_MODE
+              value: "remote-execution"   # or "hosted"
+            - name: ASTRO_CLOUD
+              value: "any"                # or aws | gcp | azure
           command: ["/bin/sh", "-c"]
           args:
             - |

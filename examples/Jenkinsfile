@@ -11,8 +11,10 @@ pipeline {
   agent any
 
   parameters {
-    string(name: 'ASTRO_ORG_ID',     defaultValue: '', description: 'Astro organization short ID')
-    string(name: 'ASTRO_CLUSTER_ID', defaultValue: '', description: 'Astro cluster ID')
+    string(name: 'ASTRO_ORG_ID',     defaultValue: '',       description: 'Astro organization short ID')
+    string(name: 'ASTRO_CLUSTER_ID', defaultValue: '',       description: 'Astro cluster ID')
+    choice(name: 'ASTRO_MODE',       choices: ['hosted', 'remote-execution'], description: 'Deployment mode (see README)')
+    choice(name: 'ASTRO_CLOUD',      choices: ['any', 'aws', 'gcp', 'azure'], description: 'Exec-plane cloud for the registry redirect target (see README)')
   }
 
   stages {
@@ -27,7 +29,7 @@ pipeline {
           // Run it and map its exit code to the build result.
           def rc = sh(returnStatus: true, script: """
             set +e
-            python3 astro_network_check.py --orgId '${params.ASTRO_ORG_ID}' --clusterId '${params.ASTRO_CLUSTER_ID}'
+            python3 astro_network_check.py --orgId '${params.ASTRO_ORG_ID}' --clusterId '${params.ASTRO_CLUSTER_ID}' --mode '${params.ASTRO_MODE}' --cloud '${params.ASTRO_CLOUD}'
           """)
           echo "astro_network_check.py exit code: ${rc}"
           if (rc == 0) {

@@ -20,7 +20,37 @@ The major usability features are:
 python3 astro_network_check.py --orgId <orgId> --clusterId <clusterId>
 # or:
 ASTRO_ORG_ID=<orgId> ASTRO_CLUSTER_ID=<clusterId> python3 astro_network_check.py
+
+# Remote Execution deployment on an AWS exec plane, testing everything as hard
+# requirements:
+python3 astro_network_check.py --orgId <orgId> --clusterId <clusterId> \
+  --mode remote-execution --cloud aws
 ```
+
+## Modes and clouds
+
+Some endpoints only apply to certain deployment types, so the check is
+configurable to avoid false reds:
+
+* `--mode hosted` (default) / `--mode remote-execution` (or `ASTRO_MODE`).
+  Remote Execution additionally requires `<clusterId>.external.astronomer.run`;
+  in `hosted` mode that endpoint is reported **N/A**, not red.
+* `--cloud aws|gcp|azure|any` (default `any`) (or `ASTRO_CLOUD`). The image
+  registry issues `307` redirects to **cloud-specific object storage** for blob
+  layer checks during image push/pull, and that target must be allowlisted too
+  (this is the failure that bit Equifax on GCP). Set `--cloud` to your exec
+  plane's cloud to test the right target as a hard requirement:
+
+  | `--cloud` | Registry redirect target tested | Allowlist entry needed |
+  |-----------|---------------------------------|------------------------|
+  | `gcp`     | `storage.googleapis.com`        | `storage.googleapis.com` |
+  | `aws`     | `s3.amazonaws.com`              | `*.s3.amazonaws.com` |
+  | `azure`   | `dockerstorageprod.blob.core.windows.net` | `*.blob.core.windows.net` |
+
+  With `--cloud any` all three are tested but a block is a **warning**, not a
+  failure (you'll be prompted to re-run with your cloud). The DAG upload bucket
+  `astroproddagdeployment.blob.core.windows.net` is Astro control-plane storage
+  and is **always** required regardless of your exec plane's cloud.
 
 Exit codes:
 
@@ -65,5 +95,3 @@ for your org and cluster first.
 | ArgoCD (PreSync hook) | [`examples/argocd-presync-job.yaml`](examples/argocd-presync-job.yaml) |
 | Kubernetes Job (any cluster / Remote Execution) | [`examples/kubernetes-job.yaml`](examples/kubernetes-job.yaml) |
 | Plain shell (jump box / VM / cron) | [`examples/run.sh`](examples/run.sh) |
-
----
