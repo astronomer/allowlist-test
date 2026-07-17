@@ -66,10 +66,11 @@ def build_targets(org_id, cluster_id):
     """The published allowlist domain set, parameterized by org/cluster."""
     targets = []
 
-    def add(host, label, kind, paths, id_derived=False):
+    def add(host, label, kind, paths, id_derived=False, conditional=None):
         targets.append({
             "host": host, "label": label, "kind": kind,
             "paths": paths, "via": None, "id_derived": id_derived,
+            "conditional": conditional,
         })
 
     # Plain HTTPS endpoints
@@ -81,7 +82,8 @@ def build_targets(org_id, cluster_id):
     add("%s.astronomer.run" % org_id, "Deployment endpoint (*.astronomer.run)", "http", ["/"],
         id_derived=True)
     add("%s.external.astronomer.run" % cluster_id, "Cluster external endpoint", "http", ["/"],
-        id_derived=True)
+        id_derived=True,
+        conditional="only exists for Remote Execution Deployments")
     add("o11y.astronomer.io", "Observability ingest", "http", ["/"])
     add("pip.astronomer.io", "Astronomer pip index", "http", ["/"])
     add("raw.githubusercontent.com", "GitHub raw content", "http", ["/"])
@@ -423,6 +425,14 @@ def check_target(target):
     try:
         addrs = resolve_host(host)
     except socket.gaierror as exc:
+        if target.get("conditional"):
+            r.update(status="N/A", stage="dns", classification="not-provisioned")
+            r["detail"].append("Hostname does not exist in DNS: %s" % exc)
+            r["detail"].append(
+                "This endpoint %s. If this cluster does not use that feature, "
+                "ignore this line. If it should, verify the --clusterId value "
+                "and re-run." % target["conditional"])
+            return r
         r.update(status="BLOCKED", stage="dns", classification="dns-failure")
         r["detail"].append("DNS resolution failed: %s" % exc)
         if target.get("id_derived"):
@@ -546,7 +556,8 @@ class Palette:
         return "\033[%sm%s\033[0m" % (code, text)
 
     def status(self, s):
-        return self.paint(s, {"PASS": "32", "WARN": "33", "BLOCKED": "31;1"}.get(s, "0"))
+        return self.paint(s, {"PASS": "32", "WARN": "33", "BLOCKED": "31;1",
+                              "N/A": "90"}.get(s, "0"))
 
 
 def summarize_http(result):
@@ -570,6 +581,8 @@ def print_result_line(r, pal, width):
             tail += "  [TLS ok: %s]" % tls["issuer"]
     elif r["status"] == "WARN":
         tail = "reachable, but " + (r["classification"] or "warning")
+    elif r["status"] == "N/A":
+        tail = "not provisioned for this cluster (see details)"
     else:
         tail = "%s at %s stage" % (r["classification"], r["stage"])
     print("  %s %s %s" % (status, host, tail))
@@ -650,6 +663,7 @@ def print_report(results, pal, started):
     blocked = [r for r in results if r["status"] == "BLOCKED"]
     warned = [r for r in results if r["status"] == "WARN"]
     passed = [r for r in results if r["status"] == "PASS"]
+    not_applicable = [r for r in results if r["status"] == "N/A"]
 
     width = max(len(r["host"]) for r in results) + 2
     print()
@@ -660,22 +674,25 @@ def print_report(results, pal, started):
         print_result_line(r, pal, width)
 
     problems = blocked + warned
-    if problems:
+    if problems or not_applicable:
         print()
         print("=" * 74)
         print(" DETAILS")
         print("=" * 74)
-        for r in problems:
+        for r in problems + not_applicable:
             print_details(r, pal)
 
     print()
     print("=" * 74)
     print(" SUMMARY")
     print("=" * 74)
-    print("  %d passed, %d warnings, %d blocked (of %d endpoints tested, "
-          "including redirect targets) in %.1fs"
-          % (len(passed), len(warned), len(blocked), len(results),
-             time.monotonic() - started))
+    line = ("  %d passed, %d warnings, %d blocked"
+            % (len(passed), len(warned), len(blocked)))
+    if not_applicable:
+        line += ", %d not applicable" % len(not_applicable)
+    line += (" (of %d endpoints tested, including redirect targets) in %.1fs"
+             % (len(results), time.monotonic() - started))
+    print(line)
 
     if problems:
         print()
