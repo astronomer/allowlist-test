@@ -53,7 +53,7 @@ from collections import deque
 # DOMAINS TESTED — this is the single source of truth; edit it to add,
 # remove, or change endpoints. All are tested over HTTPS on port 443.
 #
-# Each line is:  (host, kind, label)          with an optional 4th field.
+# Each line is:  (host, kind)          with an optional 3rd field.
 #
 #   host   hostname to test. "{orgId}" and "{clusterId}" are filled in from
 #          --orgId / --clusterId (or ASTRO_ORG_ID / ASTRO_CLUSTER_ID).
@@ -63,30 +63,27 @@ from collections import deque
 #                     redirect target (e.g. Azure Blob / ACR) or token-auth
 #                     realm it advertises is discovered and tested too
 #          "bucket"   object storage: GET / (any HTTP response = reachable)
-#   label  human-readable description shown in the report
 #
-# Optional 4th field: a condition string. If the hostname does not exist in
-# DNS, a conditional endpoint is reported N/A (with the condition shown)
-# instead of BLOCKED, and does not fail the run.
+# A 3rd field of "optional" means: if the hostname does not exist in DNS,
+# report N/A instead of BLOCKED and do not fail the run.
 # ---------------------------------------------------------------------------
 DOMAINS = [
-    ("cloud.astronomer.io",                          "http",     "Astro UI"),
-    ("api.astronomer.io",                            "http",     "Astro API"),
-    ("auth.astronomer.io",                           "http",     "Astro authentication"),
-    ("updates.astronomer.io",                        "http",     "Runtime update service"),
-    ("install.astronomer.io",                        "http",     "Astro CLI install"),
-    ("{orgId}.astronomer.run",                       "http",     "Deployment endpoint (*.astronomer.run)"),
-    ("{clusterId}.external.astronomer.run",          "http",     "Cluster external endpoint",
-     "only exists for Remote Execution Deployments"),
-    ("o11y.astronomer.io",                           "http",     "Observability ingest"),
-    ("pip.astronomer.io",                            "http",     "Astronomer pip index"),
-    ("raw.githubusercontent.com",                    "http",     "GitHub raw content"),
-    ("pypi.org",                                     "http",     "PyPI"),
-    ("{clusterId}.registry.astronomer.run",          "registry", "Deployment image registry"),
-    ("images.astronomer.cloud",                      "registry", "Astro image host (redirects to backing store)"),
-    ("air.astronomer.io",                            "registry", "Astro Runtime images (redirects to ACR)"),
-    ("astrocrpublic.azurecr.io",                     "registry", "Azure Container Registry (Astro Runtime)"),
-    ("astroproddagdeployment.blob.core.windows.net", "bucket",   "DAG deploy storage (Azure Blob)"),
+    ("cloud.astronomer.io",                          "http"),
+    ("api.astronomer.io",                            "http"),
+    ("auth.astronomer.io",                           "http"),
+    ("updates.astronomer.io",                        "http"),
+    ("install.astronomer.io",                        "http"),
+    ("{orgId}.astronomer.run",                       "http"),
+    ("{clusterId}.external.astronomer.run",          "http", "optional"),
+    ("o11y.astronomer.io",                           "http"),
+    ("pip.astronomer.io",                            "http"),
+    ("raw.githubusercontent.com",                    "http"),
+    ("pypi.org",                                     "http"),
+    ("{clusterId}.registry.astronomer.run",          "registry"),
+    ("images.astronomer.cloud",                      "registry"),
+    ("air.astronomer.io",                            "registry"),
+    ("astrocrpublic.azurecr.io",                     "registry"),
+    ("astroproddagdeployment.blob.core.windows.net", "bucket"),
 ]
 
 # HTTP paths requested per endpoint kind (see the DOMAINS comment above).
@@ -117,16 +114,14 @@ def build_targets(org_id, cluster_id):
     """Expand the DOMAINS table (defined at the top of this file)."""
     targets = []
     for row in DOMAINS:
-        host_template, kind, label = row[0], row[1], row[2]
-        conditional = row[3] if len(row) > 3 else None
+        host_template, kind = row[0], row[1]
         targets.append({
             "host": host_template.format(orgId=org_id, clusterId=cluster_id),
             "kind": kind,
-            "label": label,
             "paths": KIND_PATHS[kind],
             "via": None,
             "id_derived": "{" in host_template,
-            "conditional": conditional,
+            "optional": len(row) > 2 and row[2] == "optional",
         })
     return targets
 
@@ -430,7 +425,6 @@ def check_target(target):
     host = target["host"]
     r = {
         "host": host,
-        "label": target["label"],
         "kind": target["kind"],
         "via": target.get("via"),
         "status": None,            # PASS | WARN | BLOCKED
@@ -448,13 +442,13 @@ def check_target(target):
     try:
         addrs = resolve_host(host)
     except socket.gaierror as exc:
-        if target.get("conditional"):
+        if target.get("optional"):
             r.update(status="N/A", stage="dns", classification="not-provisioned")
             r["detail"].append("Hostname does not exist in DNS: %s" % exc)
             r["detail"].append(
-                "This endpoint %s. If this cluster does not use that feature, "
-                "ignore this line. If it should, verify the --clusterId value "
-                "and re-run." % target["conditional"])
+                "This is an optional endpoint that is not provisioned for "
+                "this cluster. If you expected it to exist, verify the "
+                "--clusterId value and re-run.")
             return r
         r.update(status="BLOCKED", stage="dns", classification="dns-failure")
         r["detail"].append("DNS resolution failed: %s" % exc)
@@ -613,7 +607,7 @@ def print_result_line(r, pal, width):
 
 def print_details(r, pal):
     print()
-    print(pal.paint("  %s — %s (%s)" % (r["host"], r["status"], r["label"]), "1"))
+    print(pal.paint("  %s — %s" % (r["host"], r["status"]), "1"))
     if r.get("via"):
         print("    Tested because: %s" % r["via"])
     if r["addresses"]:
@@ -822,7 +816,6 @@ def main(argv=None):
                     continue
                 queue.append({
                     "host": d["host"],
-                    "label": "Derived target",
                     "kind": "derived",
                     "paths": [d["path"]],
                     "via": d["why"],
