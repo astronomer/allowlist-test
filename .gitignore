@@ -1,2 +1,4 @@
 prompt.md
 .envrc
+__pycache__/
+*.pyc

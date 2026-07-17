@@ -7,6 +7,9 @@
 #
 #   ASTRO_ORG_ID=<orgId> ASTRO_CLUSTER_ID=<clusterId> ./run.sh
 #
+# Optionally also export ASTRO_MODE (hosted|remote-execution) and ASTRO_CLOUD
+# (aws|gcp|azure); the checker reads them from the environment. See the README.
+#
 # Exit codes: 0 = all reachable, 1 = something BLOCKED, 2 = warnings only.
 
 set -e

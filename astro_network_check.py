@@ -53,19 +53,26 @@ from collections import deque
 # DOMAINS TESTED — this is the single source of truth; edit it to add,
 # remove, or change endpoints. All are tested over HTTPS on port 443.
 #
-# Each line is:  (host, kind)          with an optional 3rd field.
+# Each line is:  (host, kind)          with an optional 3rd "tags" field.
 #
 #   host   hostname to test. "{orgId}" and "{clusterId}" are filled in from
 #          --orgId / --clusterId (or ASTRO_ORG_ID / ASTRO_CLUSTER_ID).
 #   kind   "http"     plain HTTPS endpoint: GET /
 #          "registry" container image registry: GET /v2/ (a 401 auth
 #                     challenge is the healthy response) plus GET /, and any
-#                     redirect target (e.g. Azure Blob / ACR) or token-auth
+#                     redirect target (e.g. cloud object storage) or token-auth
 #                     realm it advertises is discovered and tested too
 #          "bucket"   object storage: GET / (any HTTP response = reachable)
-#
-# A 3rd field of "optional" means: if the hostname does not exist in DNS,
-# report N/A instead of BLOCKED and do not fail the run.
+#   tags   optional 3rd field, space-separated. Recognized tags:
+#          "optional"              if the host does not resolve in DNS, report
+#                                  N/A instead of BLOCKED and do not fail.
+#          "mode=remote-execution" only applies with --mode remote-execution;
+#                                  otherwise reported N/A (not tested, not red).
+#          "cloud=aws|gcp|azure"   the image-registry 307 redirect target for
+#                                  that exec-plane cloud. With a matching
+#                                  --cloud it is a hard requirement; with a
+#                                  different --cloud it is N/A; with --cloud any
+#                                  (default) a block is a WARNING, not a failure.
 # ---------------------------------------------------------------------------
 DOMAINS = [
     ("cloud.astronomer.io",                          "http"),
@@ -74,7 +81,7 @@ DOMAINS = [
     ("updates.astronomer.io",                        "http"),
     ("install.astronomer.io",                        "http"),
     ("{orgId}.astronomer.run",                       "http"),
-    ("{clusterId}.external.astronomer.run",          "http", "optional"),
+    ("{clusterId}.external.astronomer.run",          "http",     "mode=remote-execution"),
     ("o11y.astronomer.io",                           "http"),
     ("pip.astronomer.io",                            "http"),
     ("raw.githubusercontent.com",                    "http"),
@@ -83,7 +90,20 @@ DOMAINS = [
     ("images.astronomer.cloud",                      "registry"),
     ("air.astronomer.io",                            "registry"),
     ("astrocrpublic.azurecr.io",                     "registry"),
+    # DAG bundle upload. Astro control-plane storage: always Azure Blob,
+    # regardless of which cloud your exec plane runs on.
     ("astroproddagdeployment.blob.core.windows.net", "bucket"),
+    # Image-registry 307 redirect targets for blob layer HEAD/GET during image
+    # push/pull. Cloud-specific: the registry (distribution v3.1.1+) redirects
+    # to the exec plane's object storage, which must be allowlisted too — the
+    # registry host passing is NOT sufficient (this is what bit Equifax/GCP).
+    # Real targets are bucket/account/region-specific; the allowlist entries
+    # are wildcards (GCP: storage.googleapis.com, AWS: *.s3.amazonaws.com,
+    # Azure: *.blob.core.windows.net) so we test a representative host per
+    # cloud. Pass --cloud to enforce the one matching your exec plane.
+    ("storage.googleapis.com",                       "bucket",   "cloud=gcp"),
+    ("s3.amazonaws.com",                             "bucket",   "cloud=aws"),
+    ("dockerstorageprod.blob.core.windows.net",      "bucket",   "cloud=azure"),
 ]
 
 # HTTP paths requested per endpoint kind (see the DOMAINS comment above).
@@ -93,7 +113,7 @@ KIND_PATHS = {
     "bucket": ["/"],
 }
 
-VERSION = "1.0"
+VERSION = "1.1"
 USER_AGENT = "astro-network-check/%s (+https://www.astronomer.io/docs/astro/allowlist-domains)" % VERSION
 ALLOWLIST_DOC = "https://www.astronomer.io/docs/astro/allowlist-domains"
 MAX_REDIRECTS = 5
@@ -126,18 +146,36 @@ def looks_like_public_ca(issuer):
 # Target set
 # --------------------------------------------------------------------------
 
-def build_targets(org_id, cluster_id):
-    """Expand the DOMAINS table (defined at the top of this file)."""
+def build_targets(org_id, cluster_id, mode="hosted", cloud="any"):
+    """Expand the DOMAINS table (defined at the top of this file), applying the
+    selected --mode and --cloud to decide which rows are required, which are
+    soft (warning-only), and which are skipped as N/A."""
     targets = []
     for row in DOMAINS:
         host_template, kind = row[0], row[1]
+        tags = row[2].split() if len(row) > 2 else []
+        mode_tag = next((t[len("mode="):] for t in tags if t.startswith("mode=")), None)
+        cloud_tag = next((t[len("cloud="):] for t in tags if t.startswith("cloud=")), None)
+        skip_reason = None
+        soft = False
+        if mode_tag and mode_tag != mode:
+            skip_reason = ("only required for --mode %s; not needed for --mode %s"
+                           % (mode_tag, mode))
+        elif cloud_tag:
+            if cloud == "any":
+                soft = True
+            elif cloud != cloud_tag:
+                skip_reason = ("image-registry redirect target for %s exec planes; "
+                               "not applicable to --cloud %s" % (cloud_tag, cloud))
         targets.append({
             "host": host_template.format(orgId=org_id, clusterId=cluster_id),
             "kind": kind,
             "paths": KIND_PATHS[kind],
             "via": None,
             "id_derived": "{" in host_template,
-            "optional": len(row) > 2 and row[2] == "optional",
+            "optional": "optional" in tags,
+            "skip_reason": skip_reason,
+            "soft": soft,
         })
     return targets
 
@@ -453,6 +491,12 @@ def check_target(target):
         "derived": [],
         "diagnostics": {},
     }
+
+    # --- Stage 0: policy skip (mode/cloud not applicable) -----------------
+    if target.get("skip_reason"):
+        r.update(status="N/A", stage="policy", classification="not-applicable")
+        r["detail"].append(target["skip_reason"])
+        return r
 
     # --- Stage 1: DNS -----------------------------------------------------
     try:
@@ -830,21 +874,43 @@ def main(argv=None):
     parser.add_argument("--clusterId", default=os.environ.get("ASTRO_CLUSTER_ID"),
                         help="Astro cluster ID (used for <clusterId>.registry/"
                              ".external.astronomer.run); defaults to $ASTRO_CLUSTER_ID")
+    parser.add_argument("--mode", choices=["hosted", "remote-execution"],
+                        default=os.environ.get("ASTRO_MODE", "hosted"),
+                        help="Deployment mode. 'remote-execution' additionally "
+                             "requires <clusterId>.external.astronomer.run; "
+                             "'hosted' (default) does not test it. Defaults to "
+                             "$ASTRO_MODE or hosted.")
+    parser.add_argument("--cloud", choices=["aws", "gcp", "azure", "any"],
+                        default=os.environ.get("ASTRO_CLOUD", "any"),
+                        help="Cloud your Astro exec plane runs on. The image "
+                             "registry 307-redirects to cloud-specific object "
+                             "storage (gcp=storage.googleapis.com, "
+                             "aws=*.s3.amazonaws.com, azure=*.blob.core.windows.net) "
+                             "that must also be allowlisted. Set this to test the "
+                             "right target as a hard requirement; 'any' (default) "
+                             "tests all three as warnings only. Defaults to "
+                             "$ASTRO_CLOUD or any.")
     opts = parser.parse_args(argv)
     if not opts.orgId:
         parser.error("provide --orgId or set ASTRO_ORG_ID")
     if not opts.clusterId:
         parser.error("provide --clusterId or set ASTRO_CLUSTER_ID")
 
-    targets = build_targets(opts.orgId, opts.clusterId)
+    targets = build_targets(opts.orgId, opts.clusterId, opts.mode, opts.cloud)
     pal = Palette(sys.stdout.isatty())
 
     print("astro-network-check v%s  |  Python %s  |  %s"
           % (VERSION, sys.version.split()[0], time.strftime("%Y-%m-%d %H:%M:%S %Z")))
+    print("Mode: %s   Cloud: %s" % (opts.mode, opts.cloud))
     print("Testing %d endpoint(s), timeout %.0fs. Redirect targets discovered "
           "along the way are tested too." % (len(targets), TIMEOUT))
     print("If endpoints are blocked this can take several minutes (blocked "
           "connections must time out); a clean run finishes in seconds.")
+    if opts.cloud == "any":
+        print("NOTE: --cloud not set. The image-registry redirect target is "
+              "cloud-specific and will be reported as a WARNING only. Re-run "
+              "with --cloud <aws|gcp|azure> matching your exec plane to test it "
+              "as a hard requirement.")
     proxies = {k: v for k, v in os.environ.items()
                if k.lower() in ("http_proxy", "https_proxy") and v}
     if proxies:
@@ -864,8 +930,18 @@ def main(argv=None):
             t = queue.popleft()
             if t["host"] in tested:
                 continue
-            print("  checking %s ..." % t["host"], flush=True)
+            if t.get("skip_reason"):
+                print("  skipping %s (%s)" % (t["host"], t["skip_reason"]), flush=True)
+            else:
+                print("  checking %s ..." % t["host"], flush=True)
             r = check_target(t)
+            if t.get("soft") and r["status"] == "BLOCKED":
+                r["status"] = "WARN"
+                r["detail"].append(
+                    "Reported as a WARNING, not a failure, because --cloud was "
+                    "not set. This is the image-registry redirect target for one "
+                    "cloud; re-run with --cloud <aws|gcp|azure> matching your "
+                    "Astro exec plane to test it as a hard requirement.")
             tested[t["host"]] = r
             results.append(r)
             for d in r["derived"]:

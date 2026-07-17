@@ -38,6 +38,14 @@ spec:
                 configMapKeyRef:
                   name: astro-allowlist
                   key: clusterId
+            # Optional (see README): add `mode` (hosted|remote-execution) and
+            # `cloud` (aws|gcp|azure|any) keys to the ConfigMap to enable them.
+            - name: ASTRO_MODE
+              valueFrom:
+                configMapKeyRef: {name: astro-allowlist, key: mode, optional: true}
+            - name: ASTRO_CLOUD
+              valueFrom:
+                configMapKeyRef: {name: astro-allowlist, key: cloud, optional: true}
           command: ["/bin/sh", "-c"]
           args:
             - |

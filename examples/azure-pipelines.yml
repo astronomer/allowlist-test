@@ -22,5 +22,9 @@ steps:
     env:
       ASTRO_ORG_ID: $(ASTRO_ORG_ID)
       ASTRO_CLUSTER_ID: $(ASTRO_CLUSTER_ID)
+      # Optional (see README): ASTRO_MODE = hosted | remote-execution,
+      # ASTRO_CLOUD = aws | gcp | azure | any
+      ASTRO_MODE: $(ASTRO_MODE)
+      ASTRO_CLOUD: $(ASTRO_CLOUD)
       RAW_URL: $(RAW_URL)
     # exit 0 = all reachable, 1 = BLOCKED (fails the step), 2 = warnings.

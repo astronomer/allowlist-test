@@ -29,6 +29,10 @@ jobs:
         env:
           ASTRO_ORG_ID: ${{ vars.ASTRO_ORG_ID }}
           ASTRO_CLUSTER_ID: ${{ vars.ASTRO_CLUSTER_ID }}
+          # Optional (see README): ASTRO_MODE = hosted | remote-execution
+          # and ASTRO_CLOUD = aws | gcp | azure | any
+          ASTRO_MODE: ${{ vars.ASTRO_MODE }}
+          ASTRO_CLOUD: ${{ vars.ASTRO_CLOUD }}
         run: python3 astro_network_check.py
         # exit 0 = all reachable, 1 = something BLOCKED (fails the job),
         # 2 = reachable with warnings (e.g. TLS interception).
