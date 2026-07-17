@@ -98,12 +98,28 @@ USER_AGENT = "astro-network-check/%s (+https://www.astronomer.io/docs/astro/allo
 ALLOWLIST_DOC = "https://www.astronomer.io/docs/astro/allowlist-domains"
 MAX_REDIRECTS = 5
 MAX_IPS_PER_HOST = 3
-TIMEOUT = 10.0          # per-connection timeout, seconds
+TIMEOUT = 10.0          # per-connection timeout for TLS/HTTP, seconds
+CONNECT_TIMEOUT = 5.0   # TCP connect timeout (shorter: a dropped SYN is common
+                        # behind enterprise firewalls, so fail fast per IP)
 DIAG_TIMEOUT = 3.0      # per-attempt timeout for SNI/TTL diagnostics
 MAX_TTL = 20            # cap for the firewall-locating TTL walk
 
 # ssl.SSLCertVerificationError exists on 3.7+; fall back for older stdlibs.
 CertVerifyError = getattr(ssl, "SSLCertVerificationError", ssl.CertificateError)
+
+# Well-known public CAs the Astro endpoints legitimately use. If certificate
+# verification fails but the presented issuer is one of these, the likely
+# cause is a MISSING local CA trust store (common in scratch/Alpine
+# containers without ca-certificates), not a TLS-intercepting proxy.
+PUBLIC_CA_HINTS = (
+    "digicert", "let's encrypt", "lets encrypt", "google trust",
+    "globalsign", "sectigo", "microsoft", "amazon", "geotrust",
+    "isrg", "baltimore", "entrust",
+)
+
+
+def looks_like_public_ca(issuer):
+    return bool(issuer) and any(h in issuer.lower() for h in PUBLIC_CA_HINTS)
 
 
 # --------------------------------------------------------------------------
@@ -407,7 +423,7 @@ def follow_http(host, path, ctx, timeout, result):
             result["derived"].append({
                 "host": parts.hostname,
                 "path": (parts.path or "/") + (("?" + parts.query) if parts.query else ""),
-                "why": "HTTP %d redirect target of %s%s" % (status, host, path),
+                "why": "HTTP %d redirect target of %s%s" % (status, host, current_path),
             })
             entry["note"] = "cross-host redirect; target will be tested separately"
             break
@@ -465,10 +481,11 @@ def check_target(target):
     tcp_errors = []
     for family, sockaddr, ip in addrs[:MAX_IPS_PER_HOST]:
         s = socket.socket(family, socket.SOCK_STREAM)
-        s.settimeout(TIMEOUT)
+        s.settimeout(CONNECT_TIMEOUT)
         try:
             t0 = time.monotonic()
             s.connect(sockaddr)
+            s.settimeout(TIMEOUT)
             r["tcp_connect_ms"] = round((time.monotonic() - t0) * 1000)
             connected = (family, sockaddr, ip, s)
             break
@@ -479,7 +496,11 @@ def check_target(target):
     if connected is None:
         r.update(status="BLOCKED", stage="tcp")
         r["classification"] = "tcp-timeout" if all("timeout" in e for e in tcp_errors) else "tcp-blocked"
-        r["detail"].append("TCP connect to port 443 failed on every resolved IP:")
+        tried = len(tcp_errors)
+        total = len(addrs)
+        scope = ("all %d resolved IP(s)" % total if tried >= total
+                 else "the first %d of %d resolved IP(s)" % (tried, total))
+        r["detail"].append("TCP connect to port 443 failed on %s:" % scope)
         r["detail"].extend("  " + e for e in tcp_errors)
         return r
     family, sockaddr, ip, sock = connected
@@ -508,10 +529,18 @@ def check_target(target):
         r["detail"].append("Certificate verification failed: %s" % exc)
         if issuer:
             r["detail"].append("Presented certificate issuer: %s" % issuer)
-        r["detail"].append(
-            "A TLS-inspecting proxy is likely intercepting this connection. "
-            "Docker/registry clients and the Astro data plane will reject the "
-            "substituted certificate — exempt these hosts from SSL decryption.")
+        if looks_like_public_ca(issuer):
+            r["detail"].append(
+                "NOTE: the presented certificate is from a public CA, so this "
+                "may not be interception at all — this host may simply be "
+                "missing a CA trust store. In a minimal container, install "
+                "'ca-certificates'. If verification fails on EVERY host below, "
+                "a missing trust store is the likely cause.")
+        else:
+            r["detail"].append(
+                "A TLS-inspecting proxy is likely intercepting this connection. "
+                "Docker/registry clients and the Astro data plane will reject the "
+                "substituted certificate — exempt these hosts from SSL decryption.")
         # Continue to HTTP through the intercepting proxy to test the path.
         http_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         http_ctx.check_hostname = False
@@ -548,8 +577,14 @@ def check_target(target):
             http_errors.append("GET %s -> %s (%s)" % (path, code, text))
 
     if not got_response:
+        intercepted = r["classification"] == "tls-interception"
         r.update(status="BLOCKED", stage="http", classification="http-failure")
-        r["detail"].append("TLS succeeded but every HTTP request failed:")
+        if intercepted:
+            r["detail"].append(
+                "The TLS-intercepting proxy above completed a handshake, but "
+                "every HTTP request through it failed:")
+        else:
+            r["detail"].append("TLS succeeded but every HTTP request failed:")
         r["detail"].extend("  " + e for e in http_errors)
         return r
 
@@ -677,6 +712,10 @@ REMEDIATION = {
 
 
 def print_report(results, pal, started):
+    if not results:
+        print("\nNo endpoints were tested (interrupted before any result).")
+        return
+
     blocked = [r for r in results if r["status"] == "BLOCKED"]
     warned = [r for r in results if r["status"] == "WARN"]
     passed = [r for r in results if r["status"] == "PASS"]
@@ -710,6 +749,22 @@ def print_report(results, pal, started):
     line += (" (of %d endpoints tested, including redirect targets) in %.1fs"
              % (len(results), time.monotonic() - started))
     print(line)
+
+    # If cert verification failed everywhere and every issuer is a public CA,
+    # it is almost certainly a missing local trust store, not interception.
+    intercept_warns = [r for r in warned if r["classification"] == "tls-interception"]
+    if intercept_warns and len(intercept_warns) == len(warned + blocked) and all(
+            looks_like_public_ca((r.get("tls") or {}).get("presented_issuer"))
+            for r in intercept_warns):
+        print()
+        print("  LIKELY CAUSE: certificate verification failed on every endpoint, "
+              "and each")
+        print("  presented a public CA certificate. This is almost certainly a "
+              "MISSING CA")
+        print("  trust store on THIS machine (e.g. a container without "
+              "'ca-certificates'),")
+        print("  not TLS interception. Install a CA bundle and re-run before "
+              "escalating.")
 
     if problems:
         print()
@@ -788,6 +843,8 @@ def main(argv=None):
           % (VERSION, sys.version.split()[0], time.strftime("%Y-%m-%d %H:%M:%S %Z")))
     print("Testing %d endpoint(s), timeout %.0fs. Redirect targets discovered "
           "along the way are tested too." % (len(targets), TIMEOUT))
+    print("If endpoints are blocked this can take several minutes (blocked "
+          "connections must time out); a clean run finishes in seconds.")
     proxies = {k: v for k, v in os.environ.items()
                if k.lower() in ("http_proxy", "https_proxy") and v}
     if proxies:
