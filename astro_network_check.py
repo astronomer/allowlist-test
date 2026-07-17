@@ -27,15 +27,7 @@ or HTTP) so your networking team knows what to fix.
         (helps distinguish an on-prem firewall from something upstream).
 
 Usage:
-    python3 astro_network_check.py --org-id <orgId> --cluster-id <clusterId>
-
-    Optional:
-      --timeout N       per-connection timeout in seconds (default 10)
-      --json            emit machine-readable JSON instead of the text report
-      --list            print the domains that would be tested, then exit
-      --include STR     only test hosts containing STR (repeatable)
-      --no-ttl-walk     skip the TTL-walk diagnostic on TLS failures
-      --no-color        disable ANSI colors
+    python3 astro_network_check.py --orgId <orgId> --clusterId <clusterId>
 
 Exit codes:
     0  all endpoints reachable
@@ -45,7 +37,6 @@ Exit codes:
 
 import argparse
 import http.client
-import json
 import os
 import re
 import socket
@@ -59,6 +50,9 @@ USER_AGENT = "astro-network-check/%s (+https://www.astronomer.io/docs/astro/allo
 ALLOWLIST_DOC = "https://www.astronomer.io/docs/astro/allowlist-domains"
 MAX_REDIRECTS = 5
 MAX_IPS_PER_HOST = 3
+TIMEOUT = 10.0          # per-connection timeout, seconds
+DIAG_TIMEOUT = 3.0      # per-attempt timeout for SNI/TTL diagnostics
+MAX_TTL = 20            # cap for the firewall-locating TTL walk
 
 # ssl.SSLCertVerificationError exists on 3.7+; fall back for older stdlibs.
 CertVerifyError = getattr(ssl, "SSLCertVerificationError", ssl.CertificateError)
@@ -407,7 +401,7 @@ def follow_http(host, path, ctx, timeout, result):
 # Per-target check
 # --------------------------------------------------------------------------
 
-def check_target(target, opts):
+def check_target(target):
     host = target["host"]
     r = {
         "host": host,
@@ -433,7 +427,7 @@ def check_target(target, opts):
         r["detail"].append("DNS resolution failed: %s" % exc)
         if target.get("id_derived"):
             r["detail"].append(
-                "This hostname is built from your --org-id/--cluster-id and only "
+                "This hostname is built from your --orgId/--clusterId and only "
                 "exists in public DNS for a valid ID. If the other domains "
                 "resolve fine, double-check the ID before blaming DNS filtering.")
         return r
@@ -444,7 +438,7 @@ def check_target(target, opts):
     tcp_errors = []
     for family, sockaddr, ip in addrs[:MAX_IPS_PER_HOST]:
         s = socket.socket(family, socket.SOCK_STREAM)
-        s.settimeout(opts.timeout)
+        s.settimeout(TIMEOUT)
         try:
             t0 = time.monotonic()
             s.connect(sockaddr)
@@ -481,7 +475,7 @@ def check_target(target, opts):
             sock.close()
         except Exception:
             pass
-        issuer = probe_unverified_issuer(family, sockaddr, host, opts.timeout)
+        issuer = probe_unverified_issuer(family, sockaddr, host, TIMEOUT)
         r["tls"] = {"ok": False, "verify_error": str(exc), "presented_issuer": issuer}
         r.update(status="WARN", stage="tls", classification="tls-interception")
         r["detail"].append("Certificate verification failed: %s" % exc)
@@ -510,11 +504,9 @@ def check_target(target, opts):
                 "hostname (SNI). This is the signature of an SNI / URL-category "
                 "firewall rule." % ip)
             r["diagnostics"]["sni_differential"] = sni_differential(
-                family, sockaddr, host, opts.timeout)
-            if not opts.no_ttl_walk:
-                r["diagnostics"]["ttl_walk"] = ttl_walk(
-                    family, sockaddr, host,
-                    timeout=min(opts.timeout, 3.0), max_ttl=opts.max_ttl)
+                family, sockaddr, host, TIMEOUT)
+            r["diagnostics"]["ttl_walk"] = ttl_walk(
+                family, sockaddr, host, timeout=DIAG_TIMEOUT, max_ttl=MAX_TTL)
         return r
 
     # --- Stage 4: HTTP GET (+ redirect / auth-realm discovery) -------------
@@ -522,7 +514,7 @@ def check_target(target, opts):
     got_response = False
     for path in target["paths"]:
         try:
-            follow_http(host, path, http_ctx, opts.timeout, r)
+            follow_http(host, path, http_ctx, TIMEOUT, r)
             got_response = True
         except Exception as exc:
             code, text = classify_exception(exc)
@@ -654,7 +646,7 @@ REMEDIATION = {
 }
 
 
-def print_report(results, opts, pal, started):
+def print_report(results, pal, started):
     blocked = [r for r in results if r["status"] == "BLOCKED"]
     warned = [r for r in results if r["status"] == "WARN"]
     passed = [r for r in results if r["status"] == "PASS"]
@@ -743,49 +735,20 @@ def main(argv=None):
                     "from inside your network.",
         epilog="Run from the network segment that will actually egress to "
                "Astro (worker/CI host). See %s" % ALLOWLIST_DOC)
-    parser.add_argument("--org-id", required=True,
+    parser.add_argument("--orgId", required=True,
                         help="Astro organization ID (used for <orgId>.astronomer.run)")
-    parser.add_argument("--cluster-id", required=True,
+    parser.add_argument("--clusterId", required=True,
                         help="Astro cluster ID (used for <clusterId>.registry/"
                              ".external.astronomer.run)")
-    parser.add_argument("--timeout", type=float, default=10.0,
-                        help="per-connection timeout in seconds (default: 10)")
-    parser.add_argument("--max-ttl", type=int, default=20,
-                        help="max TTL for the firewall-locating TTL walk (default: 20)")
-    parser.add_argument("--no-ttl-walk", action="store_true",
-                        help="skip the TTL-walk diagnostic on TLS failures")
-    parser.add_argument("--include", action="append", default=[],
-                        metavar="SUBSTRING",
-                        help="only test hosts containing SUBSTRING (repeatable)")
-    parser.add_argument("--json", action="store_true",
-                        help="emit machine-readable JSON instead of the text report")
-    parser.add_argument("--list", action="store_true",
-                        help="print the domains that would be tested, then exit")
-    parser.add_argument("--no-color", action="store_true",
-                        help="disable ANSI colors")
     opts = parser.parse_args(argv)
 
-    targets = build_targets(opts.org_id, opts.cluster_id)
-    if opts.include:
-        targets = [t for t in targets
-                   if any(s.lower() in t["host"].lower() for s in opts.include)]
-        if not targets:
-            print("No targets match --include filter(s).", file=sys.stderr)
-            return 2
-
-    if opts.list:
-        for t in targets:
-            print("%-50s %-9s %s" % (t["host"], t["kind"], t["label"]))
-        return 0
-
-    pal = Palette(sys.stdout.isatty() and not opts.no_color and not opts.json)
-    out = sys.stderr if opts.json else sys.stdout
+    targets = build_targets(opts.orgId, opts.clusterId)
+    pal = Palette(sys.stdout.isatty())
 
     print("astro-network-check v%s  |  Python %s  |  %s"
-          % (VERSION, sys.version.split()[0], time.strftime("%Y-%m-%d %H:%M:%S %Z")),
-          file=out)
+          % (VERSION, sys.version.split()[0], time.strftime("%Y-%m-%d %H:%M:%S %Z")))
     print("Testing %d endpoint(s), timeout %.0fs. Redirect targets discovered "
-          "along the way are tested too." % (len(targets), opts.timeout), file=out)
+          "along the way are tested too." % (len(targets), TIMEOUT))
     proxies = {k: v for k, v in os.environ.items()
                if k.lower() in ("http_proxy", "https_proxy") and v}
     if proxies:
@@ -793,8 +756,8 @@ def main(argv=None):
               "tests DIRECT egress, which is what the Astro data plane uses. "
               "If your environment requires a proxy for all egress, failures "
               "below may reflect that policy."
-              % ", ".join(sorted(proxies)), file=out)
-    print(file=out)
+              % ", ".join(sorted(proxies)))
+    print()
 
     started = time.monotonic()
     queue = deque(targets)
@@ -805,8 +768,8 @@ def main(argv=None):
             t = queue.popleft()
             if t["host"] in tested:
                 continue
-            print("  checking %s ..." % t["host"], file=out, flush=True)
-            r = check_target(t, opts)
+            print("  checking %s ..." % t["host"], flush=True)
+            r = check_target(t)
             tested[t["host"]] = r
             results.append(r)
             for d in r["derived"]:
@@ -820,25 +783,13 @@ def main(argv=None):
                     "via": d["why"],
                 })
     except KeyboardInterrupt:
-        print("\nInterrupted; reporting results so far.", file=out)
+        print("\nInterrupted; reporting results so far.")
+
+    print_report(results, pal, started)
 
     blocked = any(r["status"] == "BLOCKED" for r in results)
     warned = any(r["status"] == "WARN" for r in results)
-    exit_code = 1 if blocked else (2 if warned else 0)
-
-    if opts.json:
-        print(json.dumps({
-            "version": VERSION,
-            "generated": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "org_id": opts.org_id,
-            "cluster_id": opts.cluster_id,
-            "exit_code": exit_code,
-            "results": results,
-        }, indent=2))
-    else:
-        print_report(results, opts, pal, started)
-
-    return exit_code
+    return 1 if blocked else (2 if warned else 0)
 
 
 if __name__ == "__main__":
