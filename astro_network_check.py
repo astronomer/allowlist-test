@@ -49,6 +49,53 @@ import sys
 import time
 from collections import deque
 
+# ---------------------------------------------------------------------------
+# DOMAINS TESTED — this is the single source of truth; edit it to add,
+# remove, or change endpoints. All are tested over HTTPS on port 443.
+#
+# Each line is:  (host, kind, label)          with an optional 4th field.
+#
+#   host   hostname to test. "{orgId}" and "{clusterId}" are filled in from
+#          --orgId / --clusterId (or ASTRO_ORG_ID / ASTRO_CLUSTER_ID).
+#   kind   "http"     plain HTTPS endpoint: GET /
+#          "registry" container image registry: GET /v2/ (a 401 auth
+#                     challenge is the healthy response) plus GET /, and any
+#                     redirect target (e.g. Azure Blob / ACR) or token-auth
+#                     realm it advertises is discovered and tested too
+#          "bucket"   object storage: GET / (any HTTP response = reachable)
+#   label  human-readable description shown in the report
+#
+# Optional 4th field: a condition string. If the hostname does not exist in
+# DNS, a conditional endpoint is reported N/A (with the condition shown)
+# instead of BLOCKED, and does not fail the run.
+# ---------------------------------------------------------------------------
+DOMAINS = [
+    ("cloud.astronomer.io",                          "http",     "Astro UI"),
+    ("api.astronomer.io",                            "http",     "Astro API"),
+    ("auth.astronomer.io",                           "http",     "Astro authentication"),
+    ("updates.astronomer.io",                        "http",     "Runtime update service"),
+    ("install.astronomer.io",                        "http",     "Astro CLI install"),
+    ("{orgId}.astronomer.run",                       "http",     "Deployment endpoint (*.astronomer.run)"),
+    ("{clusterId}.external.astronomer.run",          "http",     "Cluster external endpoint",
+     "only exists for Remote Execution Deployments"),
+    ("o11y.astronomer.io",                           "http",     "Observability ingest"),
+    ("pip.astronomer.io",                            "http",     "Astronomer pip index"),
+    ("raw.githubusercontent.com",                    "http",     "GitHub raw content"),
+    ("pypi.org",                                     "http",     "PyPI"),
+    ("{clusterId}.registry.astronomer.run",          "registry", "Deployment image registry"),
+    ("images.astronomer.cloud",                      "registry", "Astro image host (redirects to backing store)"),
+    ("air.astronomer.io",                            "registry", "Astro Runtime images (redirects to ACR)"),
+    ("astrocrpublic.azurecr.io",                     "registry", "Azure Container Registry (Astro Runtime)"),
+    ("astroproddagdeployment.blob.core.windows.net", "bucket",   "DAG deploy storage (Azure Blob)"),
+]
+
+# HTTP paths requested per endpoint kind (see the DOMAINS comment above).
+KIND_PATHS = {
+    "http": ["/"],
+    "registry": ["/v2/", "/"],
+    "bucket": ["/"],
+}
+
 VERSION = "1.0"
 USER_AGENT = "astro-network-check/%s (+https://www.astronomer.io/docs/astro/allowlist-domains)" % VERSION
 ALLOWLIST_DOC = "https://www.astronomer.io/docs/astro/allowlist-domains"
@@ -67,48 +114,20 @@ CertVerifyError = getattr(ssl, "SSLCertVerificationError", ssl.CertificateError)
 # --------------------------------------------------------------------------
 
 def build_targets(org_id, cluster_id):
-    """The published allowlist domain set, parameterized by org/cluster."""
+    """Expand the DOMAINS table (defined at the top of this file)."""
     targets = []
-
-    def add(host, label, kind, paths, id_derived=False, conditional=None):
+    for row in DOMAINS:
+        host_template, kind, label = row[0], row[1], row[2]
+        conditional = row[3] if len(row) > 3 else None
         targets.append({
-            "host": host, "label": label, "kind": kind,
-            "paths": paths, "via": None, "id_derived": id_derived,
+            "host": host_template.format(orgId=org_id, clusterId=cluster_id),
+            "kind": kind,
+            "label": label,
+            "paths": KIND_PATHS[kind],
+            "via": None,
+            "id_derived": "{" in host_template,
             "conditional": conditional,
         })
-
-    # Plain HTTPS endpoints
-    add("cloud.astronomer.io", "Astro UI", "http", ["/"])
-    add("api.astronomer.io", "Astro API", "http", ["/"])
-    add("auth.astronomer.io", "Astro authentication", "http", ["/"])
-    add("updates.astronomer.io", "Runtime update service", "http", ["/"])
-    add("install.astronomer.io", "Astro CLI install", "http", ["/"])
-    add("%s.astronomer.run" % org_id, "Deployment endpoint (*.astronomer.run)", "http", ["/"],
-        id_derived=True)
-    add("%s.external.astronomer.run" % cluster_id, "Cluster external endpoint", "http", ["/"],
-        id_derived=True,
-        conditional="only exists for Remote Execution Deployments")
-    add("o11y.astronomer.io", "Observability ingest", "http", ["/"])
-    add("pip.astronomer.io", "Astronomer pip index", "http", ["/"])
-    add("raw.githubusercontent.com", "GitHub raw content", "http", ["/"])
-    add("pypi.org", "PyPI", "http", ["/"])
-
-    # Image registries. These are the ones that bite: they answer on /v2/,
-    # commonly 307-redirect blobs to Azure Blob / ACR, and hand out token
-    # auth realms — all of which must ALSO be allowlisted.
-    add("%s.registry.astronomer.run" % cluster_id,
-        "Deployment image registry", "registry", ["/v2/"], id_derived=True)
-    add("images.astronomer.cloud",
-        "Astro image host (redirects to backing store)", "registry", ["/v2/", "/"])
-    add("air.astronomer.io",
-        "Astro Runtime images (redirects to ACR)", "registry", ["/v2/", "/"])
-    add("astrocrpublic.azurecr.io",
-        "Azure Container Registry (Astro Runtime)", "registry", ["/v2/"])
-
-    # Object storage
-    add("astroproddagdeployment.blob.core.windows.net",
-        "DAG deploy storage (Azure Blob)", "bucket", ["/"])
-
     return targets
 
 
