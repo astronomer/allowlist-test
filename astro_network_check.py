@@ -113,7 +113,7 @@ KIND_PATHS = {
     "bucket": ["/"],
 }
 
-VERSION = "1.2"
+VERSION = "1.3"
 USER_AGENT = "astro-network-check/%s (+https://www.astronomer.io/docs/astro/allowlist-domains)" % VERSION
 ALLOWLIST_DOC = "https://www.astronomer.io/docs/astro/allowlist-domains"
 MAX_REDIRECTS = 5
@@ -190,6 +190,29 @@ WAN_IP_ECHO_SERVICES = (
     ("checkip.amazonaws.com", "/"),
     ("icanhazip.com", "/"),
 )
+
+
+def detect_local_ip():
+    """
+    The local IP the OS routing table would use to reach the internet, e.g.
+    the address a Palo Alto (or any) firewall would log as the traffic
+    Source. Determined via UDP connect(), which only consults the routing
+    table and sends no packet -- this works even with zero egress access,
+    unlike detect_wan_ip() below. Returns None only if there is no route at
+    all (e.g. no network interface up).
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return None
 
 
 def detect_wan_ip(timeout=5.0):
@@ -948,13 +971,19 @@ def main(argv=None):
 
     print("astro-network-check v%s  |  Python %s  |  %s"
           % (VERSION, sys.version.split()[0], time.strftime("%Y-%m-%d %H:%M:%S %Z")))
+    local_ip = detect_local_ip()
+    print("Host: %s   Local IP: %s" % (socket.gethostname(), local_ip or "unknown"))
+    print("  Local IP is what your firewall/NAT should log as the traffic "
+          "Source -- cross-reference it against firewall traffic logs for "
+          "this run.")
     wan_ip, wan_src = detect_wan_ip()
     if wan_ip:
-        print("Host: %s   WAN IP: %s (via %s)" % (socket.gethostname(), wan_ip, wan_src))
+        print("WAN IP: %s (via %s)" % (wan_ip, wan_src))
     else:
-        print("Host: %s   WAN IP: unknown (no echo service reachable over HTTPS -- "
-              "that alone may indicate blocked general internet egress)"
-              % socket.gethostname())
+        print("WAN IP: unknown (no echo service reachable over HTTPS -- this can "
+              "just mean general internet egress is blocked here, not that "
+              "Astro egress is; the Local IP above is the more reliable "
+              "identifier to hand your networking team)")
     print("Mode: %s   Cloud: %s" % (opts.mode, opts.cloud))
     print("Testing %d endpoint(s), timeout %.0fs. Redirect targets discovered "
           "along the way are tested too." % (len(targets), TIMEOUT))
