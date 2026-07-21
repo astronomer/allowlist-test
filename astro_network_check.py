@@ -113,7 +113,7 @@ KIND_PATHS = {
     "bucket": ["/"],
 }
 
-VERSION = "1.3"
+VERSION = "1.4"
 USER_AGENT = "astro-network-check/%s (+https://www.astronomer.io/docs/astro/allowlist-domains)" % VERSION
 ALLOWLIST_DOC = "https://www.astronomer.io/docs/astro/allowlist-domains"
 MAX_REDIRECTS = 5
@@ -123,6 +123,7 @@ CONNECT_TIMEOUT = 5.0   # TCP connect timeout (shorter: a dropped SYN is common
                         # behind enterprise firewalls, so fail fast per IP)
 DIAG_TIMEOUT = 3.0      # per-attempt timeout for SNI/TTL diagnostics
 MAX_TTL = 20            # cap for the firewall-locating TTL walk
+MAX_DRAIN_BYTES = 1_000_000  # cap on draining an unread response body before close
 
 # ssl.SSLCertVerificationError exists on 3.7+; fall back for older stdlibs.
 CertVerifyError = getattr(ssl, "SSLCertVerificationError", ssl.CertificateError)
@@ -464,8 +465,18 @@ def http_fetch(host, path, ctx, timeout):
     try:
         conn.request("GET", path, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
         resp = conn.getresponse()
-        resp.read(2048)
+        drained = len(resp.read(2048))
         headers = {k.lower(): v for k, v in resp.getheaders()}
+        # Drain the rest of the body (bounded) before closing. Closing a
+        # socket with unread data still in the kernel receive buffer makes
+        # the OS send a TCP RST instead of a clean FIN -- which then shows
+        # up in firewall traffic logs as a client-initiated reset, noise
+        # that can be mistaken for a block when diagnosing a real one.
+        while drained < MAX_DRAIN_BYTES:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            drained += len(chunk)
         return resp.status, resp.reason, headers
     finally:
         conn.close()
