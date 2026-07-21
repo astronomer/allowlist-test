@@ -113,7 +113,7 @@ KIND_PATHS = {
     "bucket": ["/"],
 }
 
-VERSION = "1.1"
+VERSION = "1.2"
 USER_AGENT = "astro-network-check/%s (+https://www.astronomer.io/docs/astro/allowlist-domains)" % VERSION
 ALLOWLIST_DOC = "https://www.astronomer.io/docs/astro/allowlist-domains"
 MAX_REDIRECTS = 5
@@ -178,6 +178,44 @@ def build_targets(org_id, cluster_id, mode="hosted", cloud="any"):
             "soft": soft,
         })
     return targets
+
+
+# --------------------------------------------------------------------------
+# Invoker identity
+# --------------------------------------------------------------------------
+
+# Plain-text IP echo services, tried in order. Any one working is enough.
+WAN_IP_ECHO_SERVICES = (
+    ("api.ipify.org", "/"),
+    ("checkip.amazonaws.com", "/"),
+    ("icanhazip.com", "/"),
+)
+
+
+def detect_wan_ip(timeout=5.0):
+    """
+    Best-effort discovery of this host's public/WAN egress IP, by asking an
+    external echo service what address it saw the request come from. Useful
+    to hand a networking team a concrete "here is the IP your firewall/NAT
+    presented to the internet" fact. Returns (ip, service) or (None, None) if
+    every service is unreachable -- which is itself informative: it means
+    this host cannot reach the public internet over HTTPS at all.
+    """
+    for host, path in WAN_IP_ECHO_SERVICES:
+        try:
+            conn = http.client.HTTPSConnection(host, 443, timeout=timeout,
+                                               context=ssl.create_default_context())
+            try:
+                conn.request("GET", path, headers={"User-Agent": USER_AGENT})
+                resp = conn.getresponse()
+                body = resp.read(128).decode("ascii", "ignore").strip()
+            finally:
+                conn.close()
+            if resp.status == 200 and body:
+                return body, host
+        except Exception:
+            continue
+    return None, None
 
 
 # --------------------------------------------------------------------------
@@ -782,6 +820,15 @@ def print_report(results, pal, started):
         for r in problems + not_applicable:
             print_details(r, pal)
 
+    if passed:
+        print()
+        print("=" * 74)
+        print(" RESOLVED IPs (passed endpoints)")
+        print("=" * 74)
+        ip_width = max(len(r["host"]) for r in passed) + 2
+        for r in passed:
+            print("  %-*s %s" % (ip_width, r["host"], ", ".join(r["addresses"]) or "n/a"))
+
     print()
     print("=" * 74)
     print(" SUMMARY")
@@ -901,6 +948,13 @@ def main(argv=None):
 
     print("astro-network-check v%s  |  Python %s  |  %s"
           % (VERSION, sys.version.split()[0], time.strftime("%Y-%m-%d %H:%M:%S %Z")))
+    wan_ip, wan_src = detect_wan_ip()
+    if wan_ip:
+        print("Host: %s   WAN IP: %s (via %s)" % (socket.gethostname(), wan_ip, wan_src))
+    else:
+        print("Host: %s   WAN IP: unknown (no echo service reachable over HTTPS -- "
+              "that alone may indicate blocked general internet egress)"
+              % socket.gethostname())
     print("Mode: %s   Cloud: %s" % (opts.mode, opts.cloud))
     print("Testing %d endpoint(s), timeout %.0fs. Redirect targets discovered "
           "along the way are tested too." % (len(targets), TIMEOUT))
