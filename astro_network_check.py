@@ -96,7 +96,8 @@ DOMAINS = [
     # Image-registry 307 redirect targets for blob layer HEAD/GET during image
     # push/pull. Cloud-specific: the registry (distribution v3.1.1+) redirects
     # to the exec plane's object storage, which must be allowlisted too — the
-    # registry host passing is NOT sufficient (this is what bit Equifax/GCP).
+    # registry host passing is NOT sufficient (a common cause of image push
+    # failures when the registry host itself is reachable).
     # Real targets are bucket/account/region-specific; the allowlist entries
     # are wildcards (GCP: storage.googleapis.com, AWS: *.s3.amazonaws.com,
     # Azure: *.blob.core.windows.net) so we test a representative host per
