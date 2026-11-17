@@ -38,7 +38,8 @@ configurable to avoid false reds:
 * `--cloud aws|gcp|azure|any` (default `any`) (or `ASTRO_CLOUD`). The image
   registry issues `307` redirects to **cloud-specific object storage** for blob
   layer checks during image push/pull, and that target must be allowlisted too
-  (this is the failure that bit Equifax on GCP). Set `--cloud` to your exec
+  (a common cause of image pushes failing when the registry host itself is
+  reachable). Set `--cloud` to your exec
   plane's cloud to test the right target as a hard requirement:
 
   | `--cloud` | Registry redirect target tested | Allowlist entry needed |
