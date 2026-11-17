@@ -79,6 +79,10 @@ break.** Allow the Astro domains by **FQDN / SNI** (e.g. a custom URL category),
 not by IP address. This checker deliberately connects by hostname so it
 exercises the same SNI-based path a real deployment does.
 
+## Using with an AI coding agent
+
+[`SKILL.md`](SKILL.md) tells an agent (Claude Code, Codex, Cursor or any other that reads `SKILL.md` or [`AGENTS.md`](AGENTS.md)) how to run the checker safely and read its output: which IDs to ask for, why it must run on your real egress path, and what each failure stage means. Open this repo in your agent and ask it to check your Astro network access.
+
 ## Examples
 
 Ready-to-use snippets for common CI/CD runners live in [`examples/`](examples/).
